@@ -439,15 +439,27 @@ const psychedelicShader = {
 const psychPass = new ShaderPass(psychedelicShader);
 composer.addPass(psychPass);
 
-// --- Mouse interaction ---
+// --- Mouse + touch interaction ---
 const mouse = new THREE.Vector2(0, 0);
 let mouseWorld = new THREE.Vector3(0, 0, 0);
 
-window.addEventListener('mousemove', (e) => {
-  mouse.x = (e.clientX / innerWidth) * 2 - 1;
-  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+function updatePointer(px, py) {
+  mouse.x = (px / innerWidth) * 2 - 1;
+  mouse.y = -(py / innerHeight) * 2 + 1;
   mouseWorld.set(mouse.x * 15, mouse.y * 10, 0);
-});
+}
+
+window.addEventListener('mousemove', (e) => updatePointer(e.clientX, e.clientY));
+
+window.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  updatePointer(e.touches[0].clientX, e.touches[0].clientY);
+}, { passive: false });
+
+window.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  updatePointer(e.touches[0].clientX, e.touches[0].clientY);
+}, { passive: false });
 
 window.addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
