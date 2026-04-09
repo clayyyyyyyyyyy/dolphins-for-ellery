@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Psychedelic Dolphin Screensaver</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #000; cursor: none; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+
+// --- Scene setup ---
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000011, 0.012);
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 2, 20);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+document.body.appendChild(renderer.domElement);
+
+// --- Lights ---
+const ambient = new THREE.AmbientLight(0x224488, 0.5);
+scene.add(ambient);
+
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(5, 10, 7);
+scene.add(dirLight);
+
+// --- Dolphin geometry builder ---
+function createDolphinGeometry() {
+  const points = [];
+  const segments = 40;
+
+  // Body profile (side view): x = along body, r = radius
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    let x = t * 6 - 3; // -3 to 3
+    // Body shape: thicker in front-middle, tapering at ends
+    let r;
+    if (t < 0.15) {
+      // Snout
+      r = 0.15 + t * 2.0;
+    } else if (t < 0.5) {
+      // Head to mid-body
+      r = 0.45 + Math.sin((t - 0.15) / 0.35 * Math.PI * 0.5) * 0.45;
+    } else if (t < 0.85) {
+      // Mid-body to tail base
+      r = 0.9 - (t - 0.5) / 0.35 * 0.6;
+    } else {
+      // Tail
+      r = 0.3 * (1 - (t - 0.85) / 0.15);
+      r = Math.max(r, 0.05);
+    }
+    points.push(new THREE.Vector2(r, x));
+  }
+
+  const lathe = new THREE.LatheGeometry(points, 24);
+  // Squash vertically to make dolphin-shaped (not round)
+  const pos = lathe.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    pos.setY(i, y * 0.7);
+    // Slight belly flatten
+    if (pos.getZ(i) < 0) {
+      pos.setZ(i, pos.getZ(i) * 0.85);
+    }
+  }
+  lathe.computeVertexNormals();
+  return lathe;
+}
+
+function createDorsalFin() {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0);
+  shape.bezierCurveTo(0.1, 0.6, -0.3, 1.0, -0.1, 1.2);
+  shape.bezierCurveTo(0.1, 1.0, 0.5, 0.5, 0.6, 0);
+  shape.lineTo(0, 0);
+
+  const extrudeSettings = { depth: 0.05, bevelEnabled: true, bevelThickness: 0.02, bevelSize: 0.02, bevelSegments: 2 };
+  return new THREE.ExtrudeGeometry(shape, extrudeSettings);
+}
+
+function createTailFluke() {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0);
+  shape.bezierCurveTo(-0.3, 0.1, -1.0, 0.8, -1.2, 0.3);
+  shape.bezierCurveTo(-0.9, 0.1, -0.4, -0.05, 0, 0);
+
+  const shape2 = new THREE.Shape();
+  shape2.moveTo(0, 0);
+  shape2.bezierCurveTo(0.3, 0.1, 1.0, 0.8, 1.2, 0.3);
+  shape2.bezierCurveTo(0.9, 0.1, 0.4, -0.05, 0, 0);
+
+  const ext = { depth: 0.04, bevelEnabled: true, bevelThickness: 0.02, bevelSize: 0.02, bevelSegments: 2 };
+  const g1 = new THREE.ExtrudeGeometry(shape, ext);
+  const g2 = new THREE.ExtrudeGeometry(shape2, ext);
+  return [g1, g2];
+}
+
+function createPectoralFin() {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0);
+  shape.bezierCurveTo(0.1, -0.1, 0.6, -0.5, 0.8, -0.2);
+  shape.bezierCurveTo(0.6, 0.0, 0.2, 0.1, 0, 0);
+
+  const ext = { depth: 0.03, bevelEnabled: true, bevelThickness: 0.01, bevelSize: 0.01, bevelSegments: 2 };
+  return new THREE.ExtrudeGeometry(shape, ext);
+}
+
+// --- Psychedelic dolphin material ---
+const dolphinShaderMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uTime: { value: 0 },
+    uHueShift: { value: 0 },
+  },
+  vertexShader: `
+    varying vec3 vNormal;
+    varying vec3 vPosition;
+    varying vec2 vUv;
+    uniform float uTime;
+
+    void main() {
+      vNormal = normalize(normalMatrix * normal);
+      vPosition = position;
+      vUv = uv;
+
+      // Subtle wave deformation
+      vec3 pos = position;
+      pos.y += sin(pos.x * 2.0 + uTime * 2.0) * 0.03;
+
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vNormal;
+    varying vec3 vPosition;
+    varying vec2 vUv;
+    uniform float uTime;
+    uniform float uHueShift;
+
+    vec3 hsv2rgb(vec3 c) {
+      vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+      vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+      return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+    }
+
+    void main() {
+      float fresnel = pow(1.0 - abs(dot(vNormal, vec3(0.0, 0.0, 1.0))), 2.5);
+
+      // Rainbow cycling based on position and time
+      float hue = fract(
+        vPosition.x * 0.15
+        + vPosition.y * 0.1
+        + uTime * 0.15
+        + uHueShift
+        + fresnel * 0.3
+      );
+
+      float sat = 0.7 + fresnel * 0.3;
+      float val = 0.5 + fresnel * 0.5;
+
+      vec3 color = hsv2rgb(vec3(hue, sat, val));
+
+      // Specular highlight
+      vec3 lightDir = normalize(vec3(0.5, 1.0, 0.8));
+      float spec = pow(max(dot(reflect(-lightDir, vNormal), vec3(0.0, 0.0, 1.0)), 0.0), 32.0);
+      color += spec * 0.5;
+
+      // Iridescent glow on edges
+      color += fresnel * hsv2rgb(vec3(fract(hue + 0.5), 0.8, 0.6)) * 0.6;
+
+      gl_FragColor = vec4(color, 1.0);
+    }
+  `,
+  side: THREE.DoubleSide,
+});
+
+// --- Build a dolphin group ---
+function buildDolphin(hueOffset) {
+  const group = new THREE.Group();
+  const mat = dolphinShaderMaterial.clone();
+  mat.uniforms.uHueShift.value = hueOffset;
+
+  // Body
+  const bodyGeo = createDolphinGeometry();
+  const body = new THREE.Mesh(bodyGeo, mat);
+  body.rotation.z = Math.PI / 2;
+  group.add(body);
+
+  // Dorsal fin
+  const dorsalGeo = createDorsalFin();
+  const dorsal = new THREE.Mesh(dorsalGeo, mat);
+  dorsal.position.set(-0.3, 0.65, -0.02);
+  dorsal.rotation.z = -0.1;
+  group.add(dorsal);
+
+  // Tail flukes
+  const [flukeL, flukeR] = createTailFluke();
+  const tailL = new THREE.Mesh(flukeL, mat);
+  tailL.position.set(-3.0, 0, -0.02);
+  tailL.rotation.set(Math.PI / 2, 0, 0.2);
+  group.add(tailL);
+
+  const tailR = new THREE.Mesh(flukeR, mat);
+  tailR.position.set(-3.0, 0, -0.02);
+  tailR.rotation.set(Math.PI / 2, 0, 0.2);
+  group.add(tailR);
+
+  // Pectoral fins
+  const pFinGeo = createPectoralFin();
+  const pFinL = new THREE.Mesh(pFinGeo, mat);
+  pFinL.position.set(0.8, -0.2, 0.55);
+  pFinL.rotation.set(0.3, 0.2, -0.5);
+  group.add(pFinL);
+
+  const pFinR = new THREE.Mesh(pFinGeo, mat);
+  pFinR.position.set(0.8, -0.2, -0.55);
+  pFinR.rotation.set(-0.3, -0.2, -0.5);
+  pFinR.scale.z = -1;
+  group.add(pFinR);
+
+  // Eye (simple sphere)
+  const eyeGeo = new THREE.SphereGeometry(0.08, 12, 12);
+  const eyeMat = new THREE.MeshStandardMaterial({ color: 0x111111, emissive: 0x222244, metalness: 0.9, roughness: 0.1 });
+  const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+  eyeL.position.set(2.1, 0.25, 0.35);
+  group.add(eyeL);
+
+  const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+  eyeR.position.set(2.1, 0.25, -0.35);
+  group.add(eyeR);
+
+  group.scale.set(0.7, 0.7, 0.7);
+  return { group, material: mat };
+}
+
+// --- Spawn dolphins ---
+const dolphins = [];
+const NUM_DOLPHINS = 8;
+
+for (let i = 0; i < NUM_DOLPHINS; i++) {
+  const hue = i / NUM_DOLPHINS;
+  const { group, material } = buildDolphin(hue);
+
+  // Swimming path parameters
+  const radius = 6 + Math.random() * 10;
+  const yBase = (Math.random() - 0.5) * 8;
+  const speed = 0.15 + Math.random() * 0.2;
+  const phase = (Math.PI * 2 * i) / NUM_DOLPHINS;
+  const yAmp = 1 + Math.random() * 2;
+  const yFreq = 0.3 + Math.random() * 0.3;
+
+  scene.add(group);
+  dolphins.push({ group, material, radius, yBase, speed, phase, yAmp, yFreq });
+}
+
+// --- Particle system (bubbles + sparkles) ---
+const particleCount = 2000;
+const particleGeo = new THREE.BufferGeometry();
+const particlePositions = new Float32Array(particleCount * 3);
+const particleSizes = new Float32Array(particleCount);
+const particleColors = new Float32Array(particleCount * 3);
+const particleSpeeds = new Float32Array(particleCount);
+
+for (let i = 0; i < particleCount; i++) {
+  particlePositions[i * 3] = (Math.random() - 0.5) * 60;
+  particlePositions[i * 3 + 1] = (Math.random() - 0.5) * 40;
+  particlePositions[i * 3 + 2] = (Math.random() - 0.5) * 60;
+  particleSizes[i] = Math.random() * 3 + 0.5;
+  particleSpeeds[i] = Math.random() * 0.5 + 0.2;
+
+  const hue = Math.random();
+  const color = new THREE.Color().setHSL(hue, 0.8, 0.6);
+  particleColors[i * 3] = color.r;
+  particleColors[i * 3 + 1] = color.g;
+  particleColors[i * 3 + 2] = color.b;
+}
+
+particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+particleGeo.setAttribute('size', new THREE.BufferAttribute(particleSizes, 1));
+particleGeo.setAttribute('color', new THREE.BufferAttribute(particleColors, 3));
+
+const particleMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    attribute float size;
+    attribute vec3 color;
+    varying vec3 vColor;
+    uniform float uTime;
+
+    void main() {
+      vColor = color;
+      vec3 pos = position;
+      pos.y += sin(uTime * 0.5 + position.x) * 0.5;
+      vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+      gl_PointSize = size * (100.0 / -mvPosition.z);
+      gl_Position = projectionMatrix * mvPosition;
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vColor;
+
+    void main() {
+      float d = length(gl_PointCoord - vec2(0.5));
+      if (d > 0.5) discard;
+      float alpha = smoothstep(0.5, 0.1, d);
+      gl_FragColor = vec4(vColor, alpha * 0.7);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+
+const particles = new THREE.Points(particleGeo, particleMat);
+scene.add(particles);
+
+// --- Trail system ---
+const trailMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: { value: 0 } },
+  vertexShader: `
+    attribute float alpha;
+    attribute vec3 color;
+    varying float vAlpha;
+    varying vec3 vColor;
+    void main() {
+      vAlpha = alpha;
+      vColor = color;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying float vAlpha;
+    varying vec3 vColor;
+    void main() {
+      gl_FragColor = vec4(vColor, vAlpha * 0.6);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+
+const TRAIL_LENGTH = 60;
+const trails = dolphins.map(() => {
+  const geo = new THREE.BufferGeometry();
+  const positions = new Float32Array(TRAIL_LENGTH * 3);
+  const alphas = new Float32Array(TRAIL_LENGTH);
+  const colors = new Float32Array(TRAIL_LENGTH * 3);
+
+  for (let i = 0; i < TRAIL_LENGTH; i++) {
+    alphas[i] = 1 - i / TRAIL_LENGTH;
+  }
+
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  const line = new THREE.Line(geo, trailMat);
+  scene.add(line);
+  return { geo, positions, colors, line };
+});
+
+// --- Post-processing ---
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 1.2, 0.6, 0.2);
+composer.addPass(bloomPass);
+
+// Chromatic aberration + vignette pass
+const psychedelicShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uTime: { value: 0 },
+    uIntensity: { value: 1.0 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float uTime;
+    uniform float uIntensity;
+    varying vec2 vUv;
+
+    void main() {
+      vec2 center = vUv - 0.5;
+      float dist = length(center);
+
+      // Chromatic aberration
+      float aberration = 0.003 * uIntensity * (1.0 + sin(uTime * 0.5) * 0.5);
+      vec2 dir = normalize(center) * aberration;
+
+      float r = texture2D(tDiffuse, vUv + dir).r;
+      float g = texture2D(tDiffuse, vUv).g;
+      float b = texture2D(tDiffuse, vUv - dir).b;
+
+      vec3 color = vec3(r, g, b);
+
+      // Subtle color pulse
+      color *= 1.0 + sin(uTime * 0.3) * 0.05;
+
+      // Vignette
+      float vignette = 1.0 - dist * 0.8;
+      color *= vignette;
+
+      gl_FragColor = vec4(color, 1.0);
+    }
+  `,
+};
+
+const psychPass = new ShaderPass(psychedelicShader);
+composer.addPass(psychPass);
+
+// --- Mouse interaction ---
+const mouse = new THREE.Vector2(0, 0);
+let mouseWorld = new THREE.Vector3(0, 0, 0);
+
+window.addEventListener('mousemove', (e) => {
+  mouse.x = (e.clientX / innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+  mouseWorld.set(mouse.x * 15, mouse.y * 10, 0);
+});
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
+
+// --- Animation loop ---
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+
+  // Camera slow orbit
+  camera.position.x = Math.sin(t * 0.08) * 4 + mouseWorld.x * 0.3;
+  camera.position.y = Math.cos(t * 0.06) * 2 + 2 + mouseWorld.y * 0.2;
+  camera.position.z = 18 + Math.sin(t * 0.1) * 3;
+  camera.lookAt(0, 0, 0);
+
+  // Animate dolphins
+  dolphins.forEach((d, i) => {
+    const angle = t * d.speed + d.phase;
+
+    // Swim in looping paths
+    const x = Math.cos(angle) * d.radius;
+    const z = Math.sin(angle) * d.radius;
+    const y = d.yBase + Math.sin(t * d.yFreq + d.phase) * d.yAmp;
+
+    d.group.position.set(x, y, z);
+
+    // Face movement direction
+    const nextAngle = angle + 0.01;
+    const nx = Math.cos(nextAngle) * d.radius;
+    const nz = Math.sin(nextAngle) * d.radius;
+    d.group.lookAt(nx, y + Math.cos(t * d.yFreq + d.phase) * d.yAmp * d.yFreq * 0.01, nz);
+
+    // Body undulation (tail wagging)
+    const tailWag = Math.sin(t * 4 + i) * 0.15;
+    d.group.rotation.z += tailWag;
+
+    // Update material time
+    d.material.uniforms.uTime.value = t;
+
+    // Update trail
+    const trail = trails[i];
+    // Shift positions back
+    for (let j = TRAIL_LENGTH - 1; j > 0; j--) {
+      trail.positions[j * 3] = trail.positions[(j - 1) * 3];
+      trail.positions[j * 3 + 1] = trail.positions[(j - 1) * 3 + 1];
+      trail.positions[j * 3 + 2] = trail.positions[(j - 1) * 3 + 2];
+    }
+    trail.positions[0] = x;
+    trail.positions[1] = y;
+    trail.positions[2] = z;
+
+    // Trail colors
+    for (let j = 0; j < TRAIL_LENGTH; j++) {
+      const hue = (i / NUM_DOLPHINS + t * 0.1 + j * 0.02) % 1;
+      const c = new THREE.Color().setHSL(hue, 0.9, 0.5);
+      trail.colors[j * 3] = c.r;
+      trail.colors[j * 3 + 1] = c.g;
+      trail.colors[j * 3 + 2] = c.b;
+    }
+
+    trail.geo.attributes.position.needsUpdate = true;
+    trail.geo.attributes.color.needsUpdate = true;
+  });
+
+  // Animate particles
+  const pPos = particleGeo.attributes.position;
+  for (let i = 0; i < particleCount; i++) {
+    let y = pPos.getY(i);
+    y += particleSpeeds[i] * 0.02;
+    if (y > 20) y = -20;
+    pPos.setY(i, y);
+  }
+  pPos.needsUpdate = true;
+  particleMat.uniforms.uTime.value = t;
+
+  // Post-processing uniforms
+  psychPass.uniforms.uTime.value = t;
+
+  composer.render();
+}
+
+animate();
+</script>
+</body>
+</html>
